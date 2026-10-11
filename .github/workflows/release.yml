@@ -19,7 +19,6 @@ jobs:
   windows:
     runs-on: windows-latest
     env:
-      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
     steps:
       - uses: actions/checkout@v4
@@ -51,12 +50,21 @@ jobs:
             echo "__END__"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Without signing key, build the installer only
-        if: env.TAURI_SIGNING_PRIVATE_KEY == ''
+      # The key may be pasted with line breaks or spaces, so clean it up first.
+      # Without a key the installer is still released, just without auto-update files.
+      - name: Signing key
         shell: bash
+        env:
+          RAW_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
         run: |
-          echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set - the installer is released, but auto-update files are not."
-          echo "EXTRA_ARGS=--config ${GITHUB_WORKSPACE//\\//}/src-tauri/tauri.nosign.conf.json" >> "$GITHUB_ENV"
+          key=$(printf '%s' "$RAW_KEY" | tr -d ' \r\n\t')
+          if [ -n "$key" ]; then
+            echo "::add-mask::$key"
+            echo "TAURI_SIGNING_PRIVATE_KEY=$key" >> "$GITHUB_ENV"
+          else
+            echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set - releasing the installer without auto-update files."
+            echo "EXTRA_ARGS=--config ${GITHUB_WORKSPACE//\\//}/src-tauri/tauri.nosign.conf.json" >> "$GITHUB_ENV"
+          fi
 
       # Build once on our own so a failure shows the real error on the run page
       - name: Build
