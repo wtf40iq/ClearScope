@@ -159,6 +159,7 @@ export const mock = {
       case "startup_target": return null;
       case "set_live": case "forget_cache": return null;
       case "find_by_path": return null;
+      case "filter_live": return (a.ids as number[]).filter((i) => nodes[i] && !nodes[i].deleted);
       case "check_delete": return (a.ids as number[]).map((i) => ({ id: i, name: nodes[i].name, path: pathOf(i), size: nodes[i].size, isDir: nodes[i].isDir, ...verdict(i) }));
       case "cancel_scan": return null;
       case "get_summary": return scanned ? summary() : null;
@@ -189,7 +190,7 @@ export const mock = {
       case "find_duplicates": { await sleep(1200); const m = new Map<string, number[]>(); for (const i of sub(a.id)) { const n = nodes[i]; if (n.isDir || n.size < a.minSize) continue; const k = n.name + n.size; m.set(k, [...(m.get(k) ?? []), i]); } return [...m.values()].filter((g) => g.length > 1).map((g) => ({ size: nodes[g[0]].size, wasted: nodes[g[0]].size * (g.length - 1), items: g.map((i) => ({ id: i, path: pathOf(i) })) })); }
       case "get_dupe_progress": return { done: 50, total: 100, bytes: 3 * GB };
       case "cancel_duplicates": return null;
-      case "delete_items": { let freed = 0; for (const id of (a.ids as number[]).filter((i) => { const v = verdict(i).level; return v === "ok" || (v === "warn" && a.allowWarn); })) { const n = nodes[id]; n.deleted = true; freed += n.size; let p = n.parent; while (p >= 0) { nodes[p].size -= n.size; p = nodes[p].parent; } } counts.clear(); return { deleted: a.ids, failed: [], freed, left: 0 }; }
+      case "delete_items": { let freed = 0; for (const id of (a.ids as number[]).filter((i) => { const v = verdict(i).level; return v === "ok" || (v === "warn" && a.allowWarn); })) { const n = nodes[id]; n.deleted = true; freed += n.size; let p = n.parent; while (p >= 0) { nodes[p].size -= n.size; p = nodes[p].parent; } } counts.clear(); return { deleted: a.ids, failed: [], freed, left: 0, cleared: 0 }; }
       default: return null;
     }
   },

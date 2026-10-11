@@ -195,9 +195,10 @@ export default function App() {
   const pickFolder = async () => { const p = await api.pickFolder(); if (p) scan(p); };
   const elevate = (target?: string) => api.restartAsAdmin(target).catch((e) => toast(String(e), "err"));
 
-  const askDelete = useCallback((ids: number[], permanent: boolean) => { if (ids.length) setDel({ ids, permanent }); }, []);
+  const askDelete = useCallback((ids: number[], permanent: boolean, contents?: boolean) => { if (ids.length) setDel({ ids, permanent, contents }); }, []);
   const onDeleted = (r: DeleteResult) => {
-    if (r.deleted.length) toast(`Освобождено ${fmtSize(r.freed)} (${fmtNum(r.deleted.length)} шт.)`, "ok");
+    const n = r.deleted.length + r.cleared;
+    if (n) toast(`Освобождено ${fmtSize(r.freed)} (${fmtNum(n)} шт.)`, "ok");
     if (r.left > 0) toast(`Часть файлов занята другими программами, осталось ${fmtSize(r.left)}. Закройте игры и браузеры и повторите.`, "info");
     else if (r.failed.length) toast(`Не удалось удалить ${r.failed.length}: ${r.failed[0].error}`, "err");
     if (selectedId != null && r.deleted.includes(selectedId)) setSelectedId(null);
@@ -258,7 +259,7 @@ export default function App() {
       const inInput = tag === "INPUT" || tag === "SELECT";
       if (e.key === "F5") e.preventDefault();
       if (scanning) { if (e.key === "Escape") api.cancelScan(); return; }
-      if (del || menu) return;
+      if (del || menu || updater.open) return;
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") { e.preventDefault(); searchRef.current?.focus(); searchRef.current?.select(); }
       else if (e.key === "F5" && summary) { e.preventDefault(); scan(summary.rootPath); }
       else if (e.key === "Escape" && inInput) { setQuery(""); (e.target as HTMLElement).blur(); if (view === "search") setView("overview"); }

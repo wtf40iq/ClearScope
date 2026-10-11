@@ -46,7 +46,7 @@ export function ContextMenu({ m, onAction, onClose }: { m: MenuState; onAction: 
 }
 
 // ------------------------------------------------------------------ delete dialog (with safety checks)
-export interface DeleteReq { ids: number[]; permanent: boolean }
+export interface DeleteReq { ids: number[]; permanent: boolean; contents?: boolean }
 
 export function DeleteDialog({ req, onClose, onDone }: { req: DeleteReq; onClose: () => void; onDone: (r: DeleteResult) => void }) {
   const [items, setItems] = useState<DeleteCheck[] | null>(null);
@@ -54,7 +54,7 @@ export function DeleteDialog({ req, onClose, onDone }: { req: DeleteReq; onClose
   const [ack, setAck] = useState(false);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  useEffect(() => { api.checkDelete(req.ids).then(setItems).catch((e) => setErr(String(e))); }, [req]);
+  useEffect(() => { api.checkDelete(req.ids, !!req.contents).then(setItems).catch((e) => setErr(String(e))); }, [req]);
   useEffect(() => {
     const k = (e: KeyboardEvent) => e.key === "Escape" && !busy && onClose();
     window.addEventListener("keydown", k);
@@ -69,7 +69,7 @@ export function DeleteDialog({ req, onClose, onDone }: { req: DeleteReq; onClose
 
   const run = async () => {
     setBusy(true);
-    try { onDone(await api.deleteItems(willDelete.map((i) => i.id), permanent, ack)); onClose(); }
+    try { onDone(await api.deleteItems(willDelete.map((i) => i.id), permanent, ack, !!req.contents)); onClose(); }
     catch (e) { setErr(String(e)); setBusy(false); }
   };
 

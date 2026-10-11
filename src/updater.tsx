@@ -59,7 +59,7 @@ export function useUpdater(toast: (t: string, k?: "ok" | "err" | "info") => void
   };
 
   const ui = <UpdateDialog phase={phase} onUpdate={(u) => install(u, false)} onLater={later} />;
-  return { check, ui };
+  return { check, ui, open: phase.kind !== "idle" };
 }
 
 /** Startup check, a little after the window shows up so it doesn't compete with opening the last scan. */

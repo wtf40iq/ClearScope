@@ -178,6 +178,12 @@ mod tests {
     #[test]
     fn rules() {
         let b = |p: &str, d: bool| classify(p, d).level;
+        // «Очистка» empties these folders: their contents must be allowed
+        let inside = |p: &str| classify(&crate::analysis::content_probe(p), true).level;
+        assert_eq!(inside(r"C:\Users\Alex\AppData\Local\Temp"), Level::Ok);
+        assert_eq!(inside(r"C:\Windows\Temp"), Level::Ok);
+        assert_eq!(inside(r"C:\Users\Alex\AppData\Local\NVIDIA\DXCache"), Level::Ok);
+        assert_eq!(inside(r"C:\Users\Alex\AppData\Local\Google\Chrome\User Data\Default\Cache"), Level::Ok);
         assert_eq!(b(r"C:\", true), Level::Blocked);
         assert_eq!(b(r"C:\Windows", true), Level::Blocked);
         assert_eq!(b(r"C:\Windows\System32\kernel32.dll", false), Level::Blocked);

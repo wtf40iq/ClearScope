@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { PieChart, ListOrdered, Sparkles, Copy, History, Search, ShieldCheck, AlertTriangle, ChevronDown, Trash2, Loader2 } from "lucide-react";
 import type { Change, CleanupGroup, DupGroup, ExtStat, NodeInfo, SearchResult, Summary } from "../types";
 import { api } from "../api";
@@ -16,7 +16,8 @@ export interface ViewProps {
   onSelect: (id: number) => void;
   onLocate: (id: number) => void;
   onContext: (id: number, x: number, y: number) => void;
-  onDelete: (ids: number[], permanent: boolean) => void;
+  /** contents: Temp/cache folders are emptied instead of removed («Очистка») */
+  onDelete: (ids: number[], permanent: boolean, contents?: boolean) => void;
 }
 
 function useLoad<T>(fn: () => Promise<T>, deps: unknown[]): [T | null, boolean] {
@@ -147,7 +148,7 @@ export function CleanupView({ focusId, version, onContext, onDelete, onSelect, o
   return (
     <div className="view">
       <Header icon={<Sparkles size={20} />} title="Умная очистка" sub={total ? `Можно освободить до ${fmtSize(total)}` : "Ничего лишнего не найдено"}>
-        <button className="btn danger" disabled={!checked.size} onClick={() => onDelete([...checked], false)}>
+        <button className="btn danger" disabled={!checked.size} onClick={() => onDelete([...checked], false, true)}>
           <Trash2 size={15} /> В корзину {checked.size ? `· ${fmtSize(selSize)}` : ""}
         </button>
       </Header>
@@ -199,7 +200,24 @@ export function DupesView({ focusId, version, onDelete, onContext, onSelect }: V
   const [prog, setProg] = useState<{ done: number; total: number; bytes: number } | null>(null);
   const [checked, setChecked] = useState<Set<number>>(new Set());
   const [err, setErr] = useState<string | null>(null);
-  useEffect(() => { setGroups(null); setChecked(new Set()); }, [focusId, version]);
+  useEffect(() => { setGroups(null); setChecked(new Set()); }, [focusId]);
+  // after deleting some copies keep the results, just drop what's gone
+  useEffect(() => {
+    if (!groups) return;
+    const ids = groups.flatMap((g) => g.items.map((i) => i.id));
+    api.filterLive(ids).then((live) => {
+      const alive = new Set(live);
+      if (alive.size === ids.length) return;
+      setGroups((gs) => gs && gs
+        .map((g) => { const items = g.items.filter((i) => alive.has(i.id)); return { ...g, items, wasted: g.size * Math.max(0, items.length - 1) }; })
+        .filter((g) => g.items.length > 1));
+      setChecked((c) => new Set([...c].filter((id) => alive.has(id))));
+    }).catch(() => {});
+  }, [version]); // eslint-disable-line react-hooks/exhaustive-deps
+  // leaving the view stops a search that is still running
+  const runningRef = useRef(false);
+  runningRef.current = running;
+  useEffect(() => () => { if (runningRef.current) api.cancelDuplicates(); }, []);
   useEffect(() => {
     if (!running) return;
     const t = setInterval(() => api.getDupeProgress().then(setProg), 250);

@@ -249,14 +249,19 @@ fn do_scan(path: &str, prefer_mft: bool, prog: &Progress) -> std::io::Result<Sca
 
 /// Reconcile a batch of changed paths into the loaded tree. Returns the
 /// number of changes applied.
-fn apply_changes(st: &AppState, mut paths: Vec<String>, ignore: &str) -> usize {
+fn apply_changes(st: &AppState, mut paths: Vec<String>, ignore: &str, gen: Option<u64>) -> usize {
     paths.retain(|p| !p.to_lowercase().starts_with(ignore));
     if paths.is_empty() {
         return 0;
     }
+    // a live thread of a replaced tree must not touch the new one
+    let current = |st: &AppState| gen.is_none_or(|g| st.live_gen.load(Ordering::SeqCst) == g);
     let (out, cluster) = {
         let mut g = st.data.write().unwrap();
         let Some(l) = g.as_mut() else { return 0 };
+        if !current(st) {
+            return 0;
+        }
         let out = live::apply_paths(&mut l.tree, &mut paths, l.cluster);
         if out.changed > 0 {
             l.dirty = true;
@@ -271,7 +276,7 @@ fn apply_changes(st: &AppState, mut paths: Vec<String>, ignore: &str) -> usize {
             .filter_map(|d| clearscope_core::walk::scan_walk(std::path::Path::new(&d), cluster, &Progress::new()).ok().map(|t| (d, t)))
             .collect();
         let mut g = st.data.write().unwrap();
-        if let Some(l) = g.as_mut() {
+        if let Some(l) = g.as_mut().filter(|_| current(st)) {
             changed += live::graft_dirs(&mut l.tree, scanned);
             l.dirty = true;
         }
@@ -299,7 +304,7 @@ fn catch_up(st: &AppState, root: &str, ignore: &str, prog: &Progress) -> bool {
     prog.total_hint.store(recs.len() as u64, Ordering::Relaxed);
     let paths = usn::records_to_paths(&vol, &recs);
     prog.done_hint.store(recs.len() as u64, Ordering::Relaxed);
-    apply_changes(st, paths, ignore);
+    apply_changes(st, paths, ignore, None);
     if let Some(l) = st.data.write().unwrap().as_mut() {
         l.journal = Some((id, new_next));
     }
@@ -379,7 +384,7 @@ fn run_job(app: AppHandle, job: Job) -> Res<()> {
                                 }
                             }
                             let _ = &ignore;
-                            Ok(Some("Показан сохранённый результат. Нажмите «Обновить», чтобы пересканировать".into()))
+                            Ok(Some("Показан сохранённый результат. Нажмите «Пересканировать», чтобы обновить его".into()))
                         }
                         Err(_) => {
                             let out = do_scan(&path, true, &prog)?;
@@ -414,6 +419,9 @@ fn run_job(app: AppHandle, job: Job) -> Res<()> {
             if fresh {
                 save_cache_if_dirty(&app, true);
             }
+            start_live(app.clone());
+        } else if st.data.read().unwrap().is_some() {
+            // cancelled or failed: the previous result stays on screen, keep it live
             start_live(app.clone());
         }
     });
@@ -496,8 +504,8 @@ fn start_live(app: AppHandle) {
                     let Some((_, next)) = st.data.read().unwrap().as_ref().and_then(|l| l.journal) else { break };
                     match usn::read(&vol, jid, next, 500_000) {
                         Ok((recs, new_next)) => {
-                            let n = if recs.is_empty() { 0 } else { apply_changes(&st, usn::records_to_paths(&vol, &recs), &ignore) };
-                            if let Some(l) = st.data.write().unwrap().as_mut() {
+                            let n = if recs.is_empty() { 0 } else { apply_changes(&st, usn::records_to_paths(&vol, &recs), &ignore, Some(gen)) };
+                            if let Some(l) = st.data.write().unwrap().as_mut().filter(|_| alive()) {
                                 l.journal = Some((jid, new_next));
                             }
                             emit(n, false, &mut last_emit, &mut pending);
@@ -545,8 +553,15 @@ fn start_live(app: AppHandle) {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                 Err(_) => break,
             }
+            if st.live_paused.load(Ordering::Relaxed) && batch.len() > 200_000 {
+                // paused for a long time on a busy disk: don't hoard events, just mark the result outdated
+                batch = Vec::new();
+                if let Some(l) = st.data.write().unwrap().as_mut().filter(|_| alive()) {
+                    l.stale = true;
+                }
+            }
             if !batch.is_empty() && (batch_start.elapsed() > Duration::from_millis(800) || batch.len() > 20_000) && !st.live_paused.load(Ordering::Relaxed) {
-                let n = apply_changes(&st, std::mem::take(&mut batch), &ignore);
+                let n = apply_changes(&st, std::mem::take(&mut batch), &ignore, Some(gen));
                 emit(n, false, &mut last_emit, &mut pending);
             }
             emit(0, false, &mut last_emit, &mut pending);
@@ -643,6 +658,12 @@ fn get_ancestors(state: State<AppState>, id: u32) -> Res<Vec<NodeInfo>> {
         check_id(l, id)?;
         Ok(l.tree.ancestors(id).into_iter().map(|x| info(l, x, false)).collect())
     })?
+}
+
+/// Which of these ids still exist (lets views prune their lists after deletions).
+#[tauri::command(async)]
+fn filter_live(state: State<AppState>, ids: Vec<u32>) -> Res<Vec<u32>> {
+    with(&state, |l| ids.into_iter().filter(|&x| l.tree.is_live(x)).collect())
 }
 
 #[tauri::command(async)]
@@ -757,10 +778,25 @@ async fn find_duplicates(app: AppHandle, id: u32, min_size: u64) -> Res<Vec<dupe
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<AppState>();
         st.dup_prog.reset();
-        let g = st.data.read().map_err(|e| e.to_string())?;
-        let l = g.as_ref().ok_or("Сначала выполните сканирование")?;
-        check_id(l, id)?;
-        let r = dupes::find_duplicates(&l.tree, id, min_size, 500, &st.dup_prog);
+        // hashing can take minutes: only collect candidates under the lock,
+        // so live updates and deleting keep working meanwhile
+        let cands = {
+            let g = st.data.read().map_err(|e| e.to_string())?;
+            let l = g.as_ref().ok_or("Сначала выполните сканирование")?;
+            check_id(l, id)?;
+            dupes::candidates(&l.tree, id, min_size)
+        };
+        let mut r = dupes::hash_groups(cands, 500, &st.dup_prog);
+        // drop files that disappeared while hashing
+        if let Some(l) = st.data.read().map_err(|e| e.to_string())?.as_ref() {
+            for g in &mut r {
+                g.items.retain(|i| l.tree.is_live(i.id));
+            }
+            r.retain(|g| g.items.len() > 1);
+            for g in &mut r {
+                g.wasted = g.size * (g.items.len() as u64 - 1);
+            }
+        }
         if st.dup_prog.cancelled() {
             return Err("Отменено".to_string());
         }
@@ -808,14 +844,33 @@ fn verdict(l: &Loaded, x: u32) -> safety::Verdict {
     safety::classify(&l.tree.path(x), l.tree.nodes[x as usize].is_dir())
 }
 
+/// From «Очистка», Temp and cache folders are emptied, not removed.
+fn clears_contents(l: &Loaded, x: u32, contents: bool) -> bool {
+    contents && x != l.tree.root && analysis::is_clearable(&l.tree, x)
+}
+
+/// Verdict for what will actually happen to the item: for an emptied folder
+/// only its contents are judged (the folder itself stays).
+fn verdict_for(l: &Loaded, x: u32, contents: bool) -> safety::Verdict {
+    if !clears_contents(l, x, contents) {
+        return verdict(l, x);
+    }
+    let v = safety::classify(&analysis::content_probe(&l.tree.path(x)), true);
+    match v.level {
+        safety::Level::Ok => safety::Verdict { level: safety::Level::Ok, reason: "Очистится содержимое, сама папка останется".into() },
+        _ => v,
+    }
+}
+
 #[tauri::command(async)]
-fn check_delete(state: State<AppState>, ids: Vec<u32>) -> Res<Vec<DeleteCheck>> {
+fn check_delete(state: State<AppState>, ids: Vec<u32>, contents: Option<bool>) -> Res<Vec<DeleteCheck>> {
+    let contents = contents.unwrap_or(false);
     with(&state, |l| {
         ids.iter()
             .filter(|&&x| l.tree.is_live(x))
             .map(|&x| {
                 let n = &l.tree.nodes[x as usize];
-                let v = verdict(l, x);
+                let v = verdict_for(l, x, contents);
                 DeleteCheck { id: x, name: n.name.to_string(), path: l.tree.path(x), size: n.size, is_dir: n.is_dir(), level: v.level, reason: v.reason }
             })
             .collect()
@@ -837,6 +892,8 @@ struct DeleteResult {
     freed: u64,
     /// bytes that stayed on disk because files were locked by other programs
     left: u64,
+    /// folders that were emptied (they stay in place)
+    cleared: u32,
 }
 
 fn remove_one(path: &std::path::Path, is_dir: bool, permanent: bool) -> Result<(), String> {
@@ -877,11 +934,12 @@ fn remove_contents(dir: &std::path::Path, permanent: bool, depth: usize) {
 }
 
 #[tauri::command]
-async fn delete_items(app: AppHandle, ids: Vec<u32>, permanent: bool, allow_warn: bool) -> Res<DeleteResult> {
+async fn delete_items(app: AppHandle, ids: Vec<u32>, permanent: bool, allow_warn: bool, contents: Option<bool>) -> Res<DeleteResult> {
+    let contents = contents.unwrap_or(false);
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<AppState>();
-        let mut res = DeleteResult { deleted: vec![], failed: vec![], freed: 0, left: 0 };
-        let (targets, cluster): (Vec<(u32, String, bool, u64)>, u64) = {
+        let mut res = DeleteResult { deleted: vec![], failed: vec![], freed: 0, left: 0, cleared: 0 };
+        let (targets, cluster): (Vec<(u32, String, bool, u64, bool)>, u64) = {
             let g = st.data.read().map_err(|e| e.to_string())?;
             let l = g.as_ref().ok_or("Нет данных")?;
             let mut v = Vec::new();
@@ -894,21 +952,39 @@ async fn delete_items(app: AppHandle, ids: Vec<u32>, permanent: bool, allow_warn
                     continue;
                 }
                 let path = l.tree.path(x);
-                let vd = verdict(l, x);
+                let vd = verdict_for(l, x, contents);
                 if vd.level == safety::Level::Blocked || (vd.level == safety::Level::Warn && !allow_warn) {
                     res.failed.push(DeleteFailure { path, error: vd.reason });
                     continue;
                 }
                 let n = &l.tree.nodes[x as usize];
-                v.push((x, path, n.is_dir(), n.size));
+                v.push((x, path, n.is_dir(), n.size, clears_contents(l, x, contents)));
             }
             (v, l.cluster)
         };
         // folders that are still (partly) there afterwards: re-read them from disk
         // so the tree, the map and «Очистка» show what is really left
         let mut rescan: Vec<(String, Tree, u32)> = Vec::new();
-        for (x, path, is_dir, size) in targets {
+        for (x, path, is_dir, size, empty_only) in targets {
             let pp = std::path::Path::new(&path);
+            if empty_only {
+                remove_contents(pp, permanent, 0);
+                match clearscope_core::walk::scan_walk(pp, cluster, &Progress::new()) {
+                    Ok(sub) => {
+                        let now = sub.nodes[sub.root as usize].size;
+                        res.freed += size.saturating_sub(now);
+                        res.left += now;
+                        res.cleared += 1;
+                        rescan.push((path, sub, x));
+                    }
+                    Err(_) if !pp.exists() => {
+                        res.freed += size;
+                        res.deleted.push(x);
+                    }
+                    Err(e) => res.failed.push(DeleteFailure { path, error: e.to_string() }),
+                }
+                continue;
+            }
             let r = remove_one(pp, is_dir, permanent);
             if r.is_err() && is_dir && pp.exists() {
                 remove_contents(pp, permanent, 0);
@@ -966,14 +1042,14 @@ fn fmt_bytes(b: u64) -> String {
 
 #[tauri::command(async)]
 fn open_item(state: State<AppState>, id: u32) -> Res<()> {
-    let p = with(&state, |l| l.tree.path(id))?;
+    let p = with(&state, |l| check_id(l, id).map(|_| l.tree.path(id)))??;
     platform::open(&p);
     Ok(())
 }
 
 #[tauri::command(async)]
 fn reveal_item(state: State<AppState>, id: u32) -> Res<()> {
-    let p = with(&state, |l| l.tree.path(id))?;
+    let p = with(&state, |l| check_id(l, id).map(|_| l.tree.path(id)))??;
     platform::reveal(&p);
     Ok(())
 }
@@ -985,6 +1061,7 @@ async fn export_csv(app: AppHandle, id: u32, path: String) -> Res<u64> {
         let st = app.state::<AppState>();
         let g = st.data.read().map_err(|e| e.to_string())?;
         let l = g.as_ref().ok_or("Нет данных")?;
+        check_id(l, id)?;
         let f = std::fs::File::create(&path).map_err(|e| e.to_string())?;
         let mut w = std::io::BufWriter::with_capacity(1 << 20, f);
         let _ = w.write_all(b"\xEF\xBB\xBF");
@@ -1031,6 +1108,7 @@ pub fn run() {
             get_children,
             get_ancestors,
             find_by_path,
+            filter_live,
             get_treemap,
             get_top_files,
             get_ext_stats,

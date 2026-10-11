@@ -124,6 +124,8 @@ export interface DeleteResult {
   freed: number;
   /** bytes that stayed because files were locked */
   left: number;
+  /** Temp/cache folders that were emptied and kept */
+  cleared: number;
 }
 
 export type View = "overview" | "types" | "top" | "cleanup" | "dupes" | "changes" | "search";

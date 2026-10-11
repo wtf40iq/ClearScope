@@ -73,6 +73,12 @@ fn regroup<K: std::hash::Hash + Eq + Send>(items: Vec<(K, (u32, String, u64))>) 
 }
 
 pub fn find_duplicates(t: &Tree, id: u32, min_size: u64, limit: usize, prog: &Progress) -> Vec<DupGroup> {
+    hash_groups(candidates(t, id, min_size), limit, prog)
+}
+
+/// Files that share their size with another file: (id, path, size).
+/// Cheap; the tree is not needed after this.
+pub fn candidates(t: &Tree, id: u32, min_size: u64) -> Vec<(u32, String, u64)> {
     let mut by_size: HashMap<u64, Vec<u32>> = HashMap::new();
     for x in t.subtree(id) {
         let n = &t.nodes[x as usize];
@@ -86,6 +92,11 @@ pub fn find_duplicates(t: &Tree, id: u32, min_size: u64, limit: usize, prog: &Pr
         .flat_map(|(s, v)| v.into_iter().map(move |x| (x, s)))
         .map(|(x, s)| (x, t.path(x), s))
         .collect();
+    cands
+}
+
+/// Hash the candidates and group identical files.
+pub fn hash_groups(cands: Vec<(u32, String, u64)>, limit: usize, prog: &Progress) -> Vec<DupGroup> {
     prog.total_hint.store(cands.len() as u64, Relaxed);
     // Stage 1: partial hash
     let stage1: Vec<((u64, u64), (u32, String, u64))> = cands

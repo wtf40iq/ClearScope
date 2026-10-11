@@ -66,7 +66,7 @@ pub struct Outcome {
 /// Reconcile changed paths. Cheap (stat per path); new folders are returned
 /// so the caller can scan them without holding the tree lock.
 pub fn apply_paths(t: &mut Tree, paths: &mut Vec<String>, cluster: u64) -> Outcome {
-    paths.sort_by_key(|p| p.len());
+    paths.sort_unstable_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
     paths.dedup();
     let mut out = Outcome::default();
     for path in paths.iter() {

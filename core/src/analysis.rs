@@ -243,6 +243,30 @@ fn classify(t: &Tree, x: u32, name: &str, path: &str, is_dir: bool, size: u64, n
     None
 }
 
+/// Groups whose folders are emptied instead of deleted: programs expect Temp
+/// and cache folders to exist, only what is inside is junk.
+pub const CLEAR_CONTENTS: &[&str] = &["temp", "browser", "shader"];
+
+/// A path standing for "something inside this folder" for the safety rules.
+pub fn content_probe(dir: &str) -> String {
+    let sep = if dir.contains('\\') { '\\' } else { '/' };
+    let mut p = dir.trim_end_matches(sep).to_string();
+    p.push(sep);
+    p.push_str("clearscope-item");
+    p
+}
+
+/// Is this folder a Temp/browser/shader cache that should be emptied rather than removed?
+pub fn is_clearable(t: &Tree, x: u32) -> bool {
+    let n = &t.nodes[x as usize];
+    if !n.is_dir() {
+        return false;
+    }
+    let path = t.path(x).to_lowercase();
+    let name = n.name.to_lowercase();
+    matches!(classify(t, x, &name, &path, true, n.size, 0, n.modified), Some(k) if CLEAR_CONTENTS.contains(&k))
+}
+
 pub fn cleanup(t: &Tree, id: u32, per_group: usize) -> Vec<CleanupGroup> {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0);
     let mut found: HashMap<&'static str, Vec<u32>> = HashMap::new();
@@ -268,7 +292,9 @@ pub fn cleanup(t: &Tree, id: u32, per_group: usize) -> Vec<CleanupGroup> {
     };
     let hit = |k: &'static str, x: u32, found: &mut HashMap<&'static str, Vec<u32>>| {
         let n = &t.nodes[x as usize];
-        if n.size > 0 && crate::safety::classify(&t.path(x), n.is_dir()).level != crate::safety::Level::Blocked {
+        // cache folders are cleared, not removed, so what matters is whether their contents may go
+        let path = if n.is_dir() && CLEAR_CONTENTS.contains(&k) { content_probe(&t.path(x)) } else { t.path(x) };
+        if n.size > 0 && crate::safety::classify(&path, n.is_dir()).level != crate::safety::Level::Blocked {
             found.entry(k).or_default().push(x);
         }
     };
