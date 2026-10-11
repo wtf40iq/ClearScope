@@ -1,0 +1,9 @@
+node_modules
+dist
+src-tauri/target
+src-tauri/gen
+core/target
+src-tauri/icons/*.png
+src-tauri/icons/*.ico
+notes.md
+*.key

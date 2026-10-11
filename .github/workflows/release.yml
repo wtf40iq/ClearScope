@@ -1,0 +1,71 @@
+name: Release
+
+# A new release is built whenever the version in package.json changes on main.
+# It can also be started by hand from the Actions tab.
+on:
+  push:
+    branches: [main]
+    paths: [package.json]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri -> target
+
+      - run: npm ci
+
+      - name: Icons
+        run: node scripts/icons.mjs
+
+      - name: Release notes
+        id: notes
+        shell: bash
+        run: |
+          node scripts/notes.mjs > notes.md
+          {
+            echo "body<<__END__"
+            cat notes.md
+            echo "__END__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Without signing key, build the installer only
+        if: env.TAURI_SIGNING_PRIVATE_KEY == ''
+        shell: bash
+        run: |
+          echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set - the installer is released, but auto-update files are not."
+          echo "EXTRA_ARGS=--config ${GITHUB_WORKSPACE//\\//}/src-tauri/tauri.nosign.conf.json" >> "$GITHUB_ENV"
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: v__VERSION__
+          releaseName: ClearScope __VERSION__
+          releaseBody: ${{ steps.notes.outputs.body }}
+          releaseDraft: false
+          prerelease: false
+          includeUpdaterJson: true
+          args: ${{ env.EXTRA_ARGS }}
