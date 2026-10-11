@@ -835,14 +835,53 @@ struct DeleteResult {
     deleted: Vec<u32>,
     failed: Vec<DeleteFailure>,
     freed: u64,
+    /// bytes that stayed on disk because files were locked by other programs
+    left: u64,
+}
+
+fn remove_one(path: &std::path::Path, is_dir: bool, permanent: bool) -> Result<(), String> {
+    if permanent {
+        if is_dir { std::fs::remove_dir_all(path) } else { std::fs::remove_file(path) }.map_err(|e| e.to_string())
+    } else {
+        trash::delete(path).map_err(|e| e.to_string())
+    }
+}
+
+/// When a folder can't be removed as a whole (typically a cache with a few files
+/// held open by a game, browser or the GPU driver), remove whatever can be
+/// removed inside it and leave the rest.
+fn remove_contents(dir: &std::path::Path, permanent: bool, depth: usize) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let items: Vec<(PathBuf, bool)> = rd
+        .flatten()
+        .map(|e| {
+            let is_dir = e.file_type().map(|t| t.is_dir() && !t.is_symlink()).unwrap_or(false);
+            (e.path(), is_dir)
+        })
+        .collect();
+    if items.is_empty() {
+        return;
+    }
+    if !permanent && trash::delete_all(items.iter().map(|(p, _)| p)).is_ok() && items.iter().all(|(p, _)| !p.exists()) {
+        return;
+    }
+    for (p, is_dir) in items {
+        if !p.exists() {
+            continue;
+        }
+        if remove_one(&p, is_dir, permanent).is_err() && is_dir && depth < 64 {
+            remove_contents(&p, permanent, depth + 1);
+            let _ = std::fs::remove_dir(&p);
+        }
+    }
 }
 
 #[tauri::command]
 async fn delete_items(app: AppHandle, ids: Vec<u32>, permanent: bool, allow_warn: bool) -> Res<DeleteResult> {
     tauri::async_runtime::spawn_blocking(move || {
         let st = app.state::<AppState>();
-        let mut res = DeleteResult { deleted: vec![], failed: vec![], freed: 0 };
-        let targets: Vec<(u32, String, bool, u64)> = {
+        let mut res = DeleteResult { deleted: vec![], failed: vec![], freed: 0, left: 0 };
+        let (targets, cluster): (Vec<(u32, String, bool, u64)>, u64) = {
             let g = st.data.read().map_err(|e| e.to_string())?;
             let l = g.as_ref().ok_or("Нет данных")?;
             let mut v = Vec::new();
@@ -863,28 +902,48 @@ async fn delete_items(app: AppHandle, ids: Vec<u32>, permanent: bool, allow_warn
                 let n = &l.tree.nodes[x as usize];
                 v.push((x, path, n.is_dir(), n.size));
             }
-            v
+            (v, l.cluster)
         };
+        // folders that are still (partly) there afterwards: re-read them from disk
+        // so the tree, the map and «Очистка» show what is really left
+        let mut rescan: Vec<(String, Tree, u32)> = Vec::new();
         for (x, path, is_dir, size) in targets {
-            let r = if permanent {
-                if is_dir { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) }.map_err(|e| e.to_string())
-            } else {
-                trash::delete(&path).map_err(|e| e.to_string())
-            };
-            match r {
-                Ok(()) => {
-                    res.deleted.push(x);
-                    res.freed += size;
-                }
-                Err(error) => res.failed.push(DeleteFailure { path, error }),
+            let pp = std::path::Path::new(&path);
+            let r = remove_one(pp, is_dir, permanent);
+            if r.is_err() && is_dir && pp.exists() {
+                remove_contents(pp, permanent, 0);
+                let _ = std::fs::remove_dir(pp);
             }
+            if !pp.exists() {
+                res.deleted.push(x);
+                res.freed += size;
+                continue;
+            }
+            if is_dir {
+                if let Ok(sub) = clearscope_core::walk::scan_walk(pp, cluster, &Progress::new()) {
+                    let now = sub.nodes[sub.root as usize].size;
+                    res.freed += size.saturating_sub(now);
+                    res.left += now;
+                    if now > 0 || r.is_err() {
+                        let error = match &r {
+                            Err(e) if now == size => e.clone(),
+                            _ => format!("осталось {} — файлы заняты другими программами", fmt_bytes(now)),
+                        };
+                        res.failed.push(DeleteFailure { path: path.clone(), error });
+                    }
+                    rescan.push((path, sub, x));
+                    continue;
+                }
+            }
+            res.failed.push(DeleteFailure { path, error: r.err().unwrap_or_else(|| "файл всё ещё на месте".into()) });
         }
-        if !res.deleted.is_empty() {
+        if !res.deleted.is_empty() || !rescan.is_empty() {
             let mut g = st.data.write().map_err(|e| e.to_string())?;
             if let Some(l) = g.as_mut() {
                 for &x in &res.deleted {
                     l.tree.remove(x);
                 }
+                live::graft_dirs(&mut l.tree, rescan.into_iter().map(|(p, t, _)| (p, t)).collect());
                 l.dirty = true;
             }
         }
@@ -892,6 +951,17 @@ async fn delete_items(app: AppHandle, ids: Vec<u32>, permanent: bool, allow_warn
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn fmt_bytes(b: u64) -> String {
+    const U: [&str; 5] = ["Б", "КБ", "МБ", "ГБ", "ТБ"];
+    let mut v = b as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 { format!("{b} Б") } else { format!("{:.1} {}", v, U[i]).replace('.', ",") }
 }
 
 #[tauri::command(async)]

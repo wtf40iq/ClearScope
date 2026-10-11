@@ -122,6 +122,8 @@ export interface DeleteResult {
   deleted: number[];
   failed: { path: string; error: string }[];
   freed: number;
+  /** bytes that stayed because files were locked */
+  left: number;
 }
 
 export type View = "overview" | "types" | "top" | "cleanup" | "dupes" | "changes" | "search";

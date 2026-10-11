@@ -1,6 +1,6 @@
 [package]
 name = "clearscope"
-version = "1.2.0"
+version = "1.2.1"
 description = "ClearScope — blazing fast disk space analyzer"
 edition = "2021"
 

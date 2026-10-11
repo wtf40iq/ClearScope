@@ -198,7 +198,8 @@ export default function App() {
   const askDelete = useCallback((ids: number[], permanent: boolean) => { if (ids.length) setDel({ ids, permanent }); }, []);
   const onDeleted = (r: DeleteResult) => {
     if (r.deleted.length) toast(`Освобождено ${fmtSize(r.freed)} (${fmtNum(r.deleted.length)} шт.)`, "ok");
-    if (r.failed.length) toast(`Не удалось удалить ${r.failed.length}: ${r.failed[0].error}`, "err");
+    if (r.left > 0) toast(`Часть файлов занята другими программами, осталось ${fmtSize(r.left)}. Закройте игры и браузеры и повторите.`, "info");
+    else if (r.failed.length) toast(`Не удалось удалить ${r.failed.length}: ${r.failed[0].error}`, "err");
     if (selectedId != null && r.deleted.includes(selectedId)) setSelectedId(null);
     setVersion((v) => v + 1);
     api.getSummary().then((s) => s && setSummary((o) => ({ ...s, fallbackReason: o?.fallbackReason ?? null })));
@@ -297,7 +298,8 @@ export default function App() {
 
   const vp: ViewProps | null = summary && {
     // heavy views (cleanup, types, duplicates…) refresh on scans/deletions, not on every live tick
-    focusId, version, selectedId, summary,
+    // they follow live changes too, throttled like the treemap
+    focusId, version: view === "dupes" ? version : mapVersion, selectedId, summary,
     onSelect: setSelectedId, onLocate: locate, onContext: openMenu, onDelete: askDelete,
   };
   const needAdmin = platform?.canElevate && !platform.elevated;
