@@ -5,7 +5,7 @@ name: Release
 on:
   push:
     branches: [main]
-    paths: [package.json]
+    paths: [package.json, .github/workflows/release.yml]
   workflow_dispatch:
 
 permissions:
@@ -57,6 +57,19 @@ jobs:
         run: |
           echo "::warning::TAURI_SIGNING_PRIVATE_KEY is not set - the installer is released, but auto-update files are not."
           echo "EXTRA_ARGS=--config ${GITHUB_WORKSPACE//\\//}/src-tauri/tauri.nosign.conf.json" >> "$GITHUB_ENV"
+
+      # Build once on our own so a failure shows the real error on the run page
+      - name: Build
+        shell: bash
+        run: |
+          set -o pipefail
+          if ! npm run tauri build -- $EXTRA_ARGS 2>&1 | tee build.log; then
+            msg=$(grep -E "error|Error|failed|panicked" build.log | tail -n 25 | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')
+            tail=$(tail -n 40 build.log | sed ':a;N;$!ba;s/%/%25/g;s/\r//g;s/\n/%0A/g')
+            echo "::error title=Build errors::$msg"
+            echo "::error title=Build log tail::$tail"
+            exit 1
+          fi
 
       - uses: tauri-apps/tauri-action@v0
         env:
